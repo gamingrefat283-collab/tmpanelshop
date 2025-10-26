@@ -9,7 +9,7 @@ header('Content-Type: application/json');
 
 // Load configuration
 $BOT_TOKEN = getenv('BOT_TOKEN') ?: '7767040819:AAFzYGSxViUbsgg06fY1yW7N2Nhszu8wujs';
-$WEBHOOK_URL = getenv('WEBHOOK_URL') ?: 'https://your-app-name.onrender.com';
+$WEBHOOK_URL = getenv('WEBHOOK_URL') ?: 'https://tmpanelshop.onrender.com';
 
 // Data file
 $DATA_FILE = __DIR__ . '/users.json';
@@ -20,7 +20,6 @@ if (!file_exists($DATA_FILE)) {
         'resellers' => [],
         'products' => []
     ]));
-    chmod($DATA_FILE, 0666);
 }
 
 // Load data
@@ -29,8 +28,12 @@ function loadData() {
     if (!file_exists($DATA_FILE)) {
         return ['resellers' => [], 'products' => []];
     }
-    $data = json_decode(file_get_contents($DATA_FILE), true);
-    return $data ?: ['resellers' => [], 'products' => []];
+    $content = file_get_contents($DATA_FILE);
+    if (empty($content)) {
+        return ['resellers' => [], 'products' => []];
+    }
+    $data = json_decode($content, true);
+    return is_array($data) ? $data : ['resellers' => [], 'products' => []];
 }
 
 // Save data
@@ -60,10 +63,13 @@ function sendMessage($chat_id, $text, $parse_mode = null) {
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     
     $result = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
+    error_log("Sent message to {$chat_id}, HTTP Code: {$http_code}");
     return $result;
 }
 
@@ -71,8 +77,17 @@ function sendMessage($chat_id, $text, $parse_mode = null) {
 function setWebhook($url) {
     global $BOT_TOKEN;
     
-    $api_url = "https://api.telegram.org/bot{$BOT_TOKEN}/setWebhook?url={$url}";
-    $result = file_get_contents($api_url);
+    $webhook_url = $url . '/index.php';
+    $api_url = "https://api.telegram.org/bot{$BOT_TOKEN}/setWebhook?url={$webhook_url}";
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $api_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    
+    $result = curl_exec($ch);
+    curl_close($ch);
     
     error_log("Webhook set result: " . $result);
     return $result;
@@ -255,25 +270,31 @@ function handleUpdate($update) {
 }
 
 // Main request handler
-$input = file_get_contents('php://input');
-error_log("Raw input: " . $input);
-
-if ($input) {
-    $update = json_decode($input, true);
-    if ($update) {
-        handleUpdate($update);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $input = file_get_contents('php://input');
+    error_log("Raw input received: " . substr($input, 0, 500));
+    
+    if ($input) {
+        $update = json_decode($input, true);
+        if ($update) {
+            handleUpdate($update);
+        }
     }
-}
-
-// Handle webhook setup via GET request
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    echo json_encode(['status' => 'success', 'message' => 'Update processed']);
+} else {
+    // Handle GET requests
     if (isset($_GET['set_webhook'])) {
         $result = setWebhook($WEBHOOK_URL);
-        echo json_encode(['status' => 'Webhook set', 'result' => $result]);
+        echo json_encode(['status' => 'success', 'message' => 'Webhook set', 'result' => $result]);
+    } elseif (isset($_GET['health'])) {
+        echo "OK";
     } else {
-        echo json_encode(['status' => 'Bot is running', 'timestamp' => time()]);
+        echo json_encode([
+            'status' => 'running', 
+            'service' => 'Telegram Reseller Bot',
+            'timestamp' => time(),
+            'webhook_url' => $WEBHOOK_URL . '/index.php'
+        ]);
     }
-} else {
-    echo json_encode(['status' => 'Update processed']);
 }
 ?>
