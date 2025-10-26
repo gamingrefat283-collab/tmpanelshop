@@ -1,0 +1,279 @@
+<?php
+// Enable error logging
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', __DIR__ . '/error.log');
+
+// Set content type
+header('Content-Type: application/json');
+
+// Load configuration
+$BOT_TOKEN = getenv('BOT_TOKEN') ?: '7767040819:AAFzYGSxViUbsgg06fY1yW7N2Nhszu8wujs';
+$WEBHOOK_URL = getenv('WEBHOOK_URL') ?: 'https://your-app-name.onrender.com';
+
+// Data file
+$DATA_FILE = __DIR__ . '/users.json';
+
+// Initialize data files
+if (!file_exists($DATA_FILE)) {
+    file_put_contents($DATA_FILE, json_encode([
+        'resellers' => [],
+        'products' => []
+    ]));
+    chmod($DATA_FILE, 0666);
+}
+
+// Load data
+function loadData() {
+    global $DATA_FILE;
+    if (!file_exists($DATA_FILE)) {
+        return ['resellers' => [], 'products' => []];
+    }
+    $data = json_decode(file_get_contents($DATA_FILE), true);
+    return $data ?: ['resellers' => [], 'products' => []];
+}
+
+// Save data
+function saveData($data) {
+    global $DATA_FILE;
+    file_put_contents($DATA_FILE, json_encode($data, JSON_PRETTY_PRINT));
+}
+
+// Send Telegram message
+function sendMessage($chat_id, $text, $parse_mode = null) {
+    global $BOT_TOKEN;
+    
+    $data = [
+        'chat_id' => $chat_id,
+        'text' => $text
+    ];
+    
+    if ($parse_mode) {
+        $data['parse_mode'] = $parse_mode;
+    }
+    
+    $url = "https://api.telegram.org/bot{$BOT_TOKEN}/sendMessage";
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    
+    $result = curl_exec($ch);
+    curl_close($ch);
+    
+    return $result;
+}
+
+// Set webhook
+function setWebhook($url) {
+    global $BOT_TOKEN;
+    
+    $api_url = "https://api.telegram.org/bot{$BOT_TOKEN}/setWebhook?url={$url}";
+    $result = file_get_contents($api_url);
+    
+    error_log("Webhook set result: " . $result);
+    return $result;
+}
+
+// Handle incoming update
+function handleUpdate($update) {
+    $data = loadData();
+    $resellers = &$data['resellers'];
+    $products = &$data['products'];
+    
+    if (!isset($update['message'])) {
+        return;
+    }
+    
+    $message = $update['message'];
+    $chat_id = $message['chat']['id'];
+    $text = $message['text'] ?? '';
+    $username = $message['from']['username'] ?? '';
+    
+    // Log the request
+    error_log("Received message from {$username}: {$text}");
+    
+    $args = explode(' ', $text);
+    $command = $args[0];
+    
+    try {
+        switch ($command) {
+            case '/start':
+            case '/help':
+                $help_text = "🤖 Reseller Bot Commands:\n\n";
+                $help_text .= "/balance - Check your balance\n";
+                $help_text .= "/products - List available products\n";
+                $help_text .= "/buy <product> - Purchase a product\n";
+                $help_text .= "/my_keys - View your purchased keys\n\n";
+                $help_text .= "Admin Commands:\n";
+                $help_text .= "/add_reseller <username>\n";
+                $help_text .= "/add_product <name> <price>\n";
+                $help_text .= "/add_keys <product> <keys...>\n";
+                sendMessage($chat_id, $help_text);
+                break;
+                
+            case '/add_reseller':
+                if (count($args) == 2) {
+                    $new_username = $args[1];
+                    if (!isset($resellers[$new_username])) {
+                        $resellers[$new_username] = ['balance' => 0, 'keys' => []];
+                        saveData($data);
+                        sendMessage($chat_id, "✅ Reseller {$new_username} added.");
+                    } else {
+                        sendMessage($chat_id, "❌ Reseller {$new_username} already exists.");
+                    }
+                } else {
+                    sendMessage($chat_id, "Usage: /add_reseller <username>");
+                }
+                break;
+                
+            case '/add_product':
+                if (count($args) == 3) {
+                    $name = $args[1];
+                    $price = intval($args[2]);
+                    if ($price > 0) {
+                        $products[$name] = ['price' => $price, 'keys' => []];
+                        saveData($data);
+                        sendMessage($chat_id, "✅ Product {$name} added with price {$price}.");
+                    } else {
+                        sendMessage($chat_id, "❌ Price must be positive.");
+                    }
+                } else {
+                    sendMessage($chat_id, "Usage: /add_product <name> <price>");
+                }
+                break;
+                
+            case '/add_keys':
+                if (count($args) >= 3) {
+                    $name = $args[1];
+                    $keys = array_slice($args, 2);
+                    if (isset($products[$name])) {
+                        $products[$name]['keys'] = array_merge($products[$name]['keys'], $keys);
+                        saveData($data);
+                        sendMessage($chat_id, "✅ " . count($keys) . " keys added to {$name}.");
+                    } else {
+                        sendMessage($chat_id, "❌ Product {$name} not found.");
+                    }
+                } else {
+                    sendMessage($chat_id, "Usage: /add_keys <product> <key1> <key2> ...");
+                }
+                break;
+                
+            case '/buy':
+                if (count($args) == 2) {
+                    if (!$username) {
+                        sendMessage($chat_id, "❌ You need a Telegram username to use this bot.");
+                        break;
+                    }
+                    
+                    if (!isset($resellers[$username])) {
+                        sendMessage($chat_id, "❌ You are not a registered reseller.");
+                        break;
+                    }
+                    
+                    $product_name = $args[1];
+                    if (!isset($products[$product_name]) || empty($products[$product_name]['keys'])) {
+                        sendMessage($chat_id, "❌ Product not available or out of stock.");
+                        break;
+                    }
+                    
+                    $price = $products[$product_name]['price'];
+                    if ($resellers[$username]['balance'] < $price) {
+                        sendMessage($chat_id, "❌ Insufficient balance.");
+                        break;
+                    }
+                    
+                    // Process purchase
+                    $key = array_shift($products[$product_name]['keys']);
+                    $resellers[$username]['balance'] -= $price;
+                    $resellers[$username]['keys'][] = $key;
+                    saveData($data);
+                    
+                    sendMessage($chat_id, "✅ Purchase successful. Your key: {$key}");
+                } else {
+                    sendMessage($chat_id, "Usage: /buy <product_name>");
+                }
+                break;
+                
+            case '/balance':
+                if (!$username) {
+                    sendMessage($chat_id, "❌ You need a Telegram username to use this bot.");
+                    break;
+                }
+                
+                if (isset($resellers[$username])) {
+                    $balance = $resellers[$username]['balance'];
+                    sendMessage($chat_id, "💳 Your balance: {$balance}");
+                } else {
+                    sendMessage($chat_id, "❌ You are not a registered reseller.");
+                }
+                break;
+                
+            case '/products':
+                if (empty($products)) {
+                    sendMessage($chat_id, "❌ No products available.");
+                    break;
+                }
+                
+                $response = "📦 Available Products:\n\n";
+                foreach ($products as $name => $info) {
+                    $stock = count($info['keys']);
+                    $response .= "{$name}\nPrice: {$info['price']} | Stock: {$stock}\n\n";
+                }
+                sendMessage($chat_id, $response);
+                break;
+                
+            case '/my_keys':
+                if (!$username) {
+                    sendMessage($chat_id, "❌ You need a Telegram username to use this bot.");
+                    break;
+                }
+                
+                if (isset($resellers[$username]) && !empty($resellers[$username]['keys'])) {
+                    $keys = $resellers[$username]['keys'];
+                    $response = "🔑 Your Keys:\n\n";
+                    foreach ($keys as $index => $key) {
+                        $response .= ($index + 1) . ". {$key}\n";
+                    }
+                    sendMessage($chat_id, $response);
+                } else {
+                    sendMessage($chat_id, "❌ You haven't purchased any keys yet.");
+                }
+                break;
+                
+            default:
+                sendMessage($chat_id, "❌ Unknown command. Use /help for available commands.");
+                break;
+        }
+    } catch (Exception $e) {
+        error_log("Error handling command: " . $e->getMessage());
+        sendMessage($chat_id, "❌ An error occurred. Please try again.");
+    }
+}
+
+// Main request handler
+$input = file_get_contents('php://input');
+error_log("Raw input: " . $input);
+
+if ($input) {
+    $update = json_decode($input, true);
+    if ($update) {
+        handleUpdate($update);
+    }
+}
+
+// Handle webhook setup via GET request
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (isset($_GET['set_webhook'])) {
+        $result = setWebhook($WEBHOOK_URL);
+        echo json_encode(['status' => 'Webhook set', 'result' => $result]);
+    } else {
+        echo json_encode(['status' => 'Bot is running', 'timestamp' => time()]);
+    }
+} else {
+    echo json_encode(['status' => 'Update processed']);
+}
+?>
